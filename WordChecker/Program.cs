@@ -29,6 +29,16 @@
 using System;
 using System.Collections.Generic;
 using WordChecker;
+using Serilog;
+
+
+using var mutex = new Mutex(true, "WordCheckerMutex", out bool createdNew);
+
+if (!createdNew)
+{
+    Console.WriteLine("Application is already running.");
+    return;
+}
 
 var json = new StreamReader("config.json").ReadToEnd();
 var config = System.Text.Json.JsonSerializer.Deserialize<Config>(json);
@@ -41,19 +51,35 @@ if (config == null)
 
 var inputFilePath = config.InputDirectory;
 var outputDirectory = config.OutputDirectory;
+var logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .WriteTo.File(config.LogDirectory, rollingInterval: RollingInterval.Hour)
+    .CreateLogger();
 
 var forbiddenWords = new HashSet<string>(File.ReadAllLines(inputFilePath));
 
 var drives = DriveInfo.GetDrives();
 
 var wordsSearcher = new WordsSearcher();
+var totalForbWordsCount = 0;
+var tasks = drives.Where(d => d.IsReady).Select(drive => Task.Run(() =>
+{
+    var words = wordsSearcher.SearchWordsInDirectory(drive.RootDirectory.FullName, forbiddenWords, outputDirectory, logger);
+    logger.Information($"Drive {drive.Name}: Found {words.Count} files with forbidden words.");
+    Interlocked.Add(ref totalForbWordsCount, words.Count);
+}));
+
+await Task.WhenAll(tasks);
+
+logger.Information($"Found {totalForbWordsCount} files with forbidden words.");
 //foreach (var drive in drives)
 //{
 //    if (drive.IsReady)
 //    {
-        var words = wordsSearcher.SearchWordsInDirectory("C:\\", forbiddenWords, outputDirectory);
-        Console.WriteLine(string.Join(' ', words));
+//var words = wordsSearcher.SearchWordsInDirectory("D:\\IT STEP", forbiddenWords, outputDirectory);
+//        Console.WriteLine(string.Join(' ', words));
 //    }
 //}
+
 
 

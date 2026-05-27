@@ -1,4 +1,6 @@
 ﻿{
-  "InputDirectory": "input.txt",
-  "OutputDirectory": "C:\\IT Step\\test"
+    "InputDirectory": "D:\\IT STEP\\moon\\input.txt",
+    "OutputDirectory": "D:\\IT Step\\test",
+    "LogDirectory": "D:\\IT Step\\logs\\log.txt"
 }
+
