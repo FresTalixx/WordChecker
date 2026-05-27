@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -11,6 +12,8 @@ namespace WordChecker;
 
 public class WordsSearcher
 {
+    object lockObj = new object();
+
 
     public FilesAndInfo GetFilePathsFromDirectory(string directoryPath, ILogger logger)
     {
@@ -47,7 +50,7 @@ public class WordsSearcher
 
     }
 
-    public string CopyFile(string sourceFilePath, string destinationDirectory, ILogger logger)
+    public string CopyFile(string sourceFilePath, string destinationDirectory, int amountOfMatches, ILogger logger)
     {
         var destFileName = string.Empty;
         try
@@ -63,7 +66,9 @@ public class WordsSearcher
                 number++;
             }
             File.Copy(sourceFilePath, destFileName, true);
-            logger.Information($"Copied file: {Path.GetFileName(sourceFilePath)}");
+            var fileInfo = new FileInfo(destFileName);
+            logger.Information($"Copied file: {Path.GetFileName(sourceFilePath)} to {Path.GetFullPath(destFileName)}" +
+                $" \t Size: {fileInfo.Length} bytes \t Matches: {amountOfMatches}");
         }
         catch (Exception ex)
         {
@@ -73,7 +78,7 @@ public class WordsSearcher
         return destFileName;
     }
 
-    public void CreateModifiedFile(string sourceFilePath, string destinationDirectory, string modifiedContent, ILogger logger)
+    public void CreateModifiedFile(string sourceFilePath, string destinationDirectory, int amountOfMatches, string modifiedContent, ILogger logger)
     {
         var destFileName = string.Empty;
         try
@@ -99,6 +104,7 @@ public class WordsSearcher
     public List<string> SearchWordsInDirectory(string directoryPath,
         HashSet<string> forbiddenWords, string outputDirectory, ILogger logger)
     {
+        var sw = Stopwatch.StartNew();
         var info = GetFilePathsFromDirectory(directoryPath, logger);
         var foundFiles = new ConcurrentBag<string>();
         var files = info.Files;
@@ -108,7 +114,9 @@ public class WordsSearcher
         logger.Information($"Searching for forbidden words in directory '{directoryPath}'...");
         var forbiddenWordsPattern = string.Join("|", forbiddenWords.Select(Regex.Escape));
         var wordRegex = new Regex($@"\b({forbiddenWordsPattern})\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        
+
+        var wordCountDict = new Dictionary<string, int>();
+
         Parallel.ForEach(files, file =>
         {
             try
@@ -118,14 +126,25 @@ public class WordsSearcher
 
                 if (matches.Count > 0)
                 {
+                    lock (lockObj)
+                    {
+                        foreach (Match match in matches)
+                        {
+                            var word = match.Value.ToLower();
+                            if (wordCountDict.ContainsKey(word))
+                                wordCountDict[word]++;
+                            else
+                                wordCountDict[word] = 1;
+                        }
+                    }
                     foundFiles.Add(file);
                     
                     // Copy original
-                    var destFileName = CopyFile(file, outputDirectory, logger);
+                    var destFileName = CopyFile(file, outputDirectory, matches.Count, logger);
 
                     // Create modified version
                     var modifiedContent = wordRegex.Replace(content, "*******");
-                    CreateModifiedFile(file, outputDirectory, modifiedContent, logger);
+                    CreateModifiedFile(file, outputDirectory, matches.Count, modifiedContent, logger);
                 }
             }
             catch (Exception ex)
@@ -136,6 +155,17 @@ public class WordsSearcher
 
         logger.Information("Searching finished!");
         logger.Information($"Finished searching in directory '{directoryPath}'");
+
+        // Log top 10 most frequent forbidden words
+        var topWords = wordCountDict.OrderByDescending(kv => kv.Value).Take(10);
+        logger.Information("Top 10 most frequent forbidden words:");
+        foreach (var kv in topWords)
+        {
+            logger.Information($"{kv.Key}: {kv.Value} occurrences");
+        }
+        sw.Stop();
+        logger.Information($" Total time taken: {sw.Elapsed.TotalSeconds} seconds");
+
         return foundFiles.ToList();
     }
 }
