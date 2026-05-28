@@ -56,18 +56,45 @@ var logger = new LoggerConfiguration()
     .WriteTo.File(config.LogDirectory, rollingInterval: RollingInterval.Hour)
     .CreateLogger();
 
+var cancellationTokenSource = new CancellationTokenSource();
+
 var forbiddenWords = new HashSet<string>(File.ReadAllLines(inputFilePath));
 
 var drives = DriveInfo.GetDrives();
 
-var wordsSearcher = new WordsSearcher();
+var wordsSearcher = new WordsSearcher(logger, cancellationTokenSource);
 var totalForbWordsCount = 0;
 var tasks = drives.Where(d => d.IsReady).Select(drive => Task.Run(() =>
 {
-    var words = wordsSearcher.SearchWordsInDirectory(drive.RootDirectory.FullName, forbiddenWords, outputDirectory, logger);
+    var words = wordsSearcher.SearchWordsInDirectory(drive.RootDirectory.FullName, forbiddenWords, outputDirectory);
     logger.Information($"Drive {drive.Name}: Found {words.Count} files with forbidden words.");
     Interlocked.Add(ref totalForbWordsCount, words.Count);
-}));
+})).ToList();
+
+var inputTask = Task.Run(() =>
+{
+    while (!cancellationTokenSource.Token.IsCancellationRequested)
+    {
+        var key = Console.ReadKey(true).Key;
+        if (key == ConsoleKey.P)
+        {
+            wordsSearcher.Pause();
+            logger.Information("Search paused.");
+        }
+        else if (key == ConsoleKey.R)
+        {
+            wordsSearcher.Resume();
+            logger.Information("Search resumed.");
+        }
+        else if (key == ConsoleKey.S)
+        {
+            wordsSearcher.Stop();
+            logger.Information("Search stopped.");
+            break;
+        }
+    }
+});
+
 
 await Task.WhenAll(tasks);
 

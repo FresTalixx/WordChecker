@@ -10,12 +10,41 @@ using System.Threading.Tasks;
 
 namespace WordChecker;
 
-public class WordsSearcher
+public class WordsSearcher(ILogger logger, CancellationTokenSource cancellationTokenSource)
 {
     object lockObj = new object();
+    bool isPaused = false;
+    bool isCancelled = false;
+    ManualResetEventSlim manualResetEvent = new ManualResetEventSlim(true);
 
+    public void Pause()
+    {
+        if (!isPaused)
+        {
+            manualResetEvent.Reset();
+            logger.Information("Search paused by user.");
+            isPaused = true;
+        }
+        
+    }
 
-    public FilesAndInfo GetFilePathsFromDirectory(string directoryPath, ILogger logger)
+    public void Stop()
+    {
+        cancellationTokenSource.Cancel();
+        manualResetEvent.Set();
+        logger.Information("Search stopped by user.");
+    }
+
+    public void Resume()
+    {
+        if (isPaused)
+        {
+            manualResetEvent.Set();
+            isPaused = false;
+        }
+    }
+
+    public FilesAndInfo GetFilePathsFromDirectory(string directoryPath)
     {
         var foundFiles = new ConcurrentBag<string>();
         var filePatterns = new[] { "*.txt", "*.md" };
@@ -50,7 +79,8 @@ public class WordsSearcher
 
     }
 
-    public string CopyFile(string sourceFilePath, string destinationDirectory, int amountOfMatches, ILogger logger)
+
+    public string CopyFile(string sourceFilePath, string destinationDirectory, int amountOfMatches)
     {
         var destFileName = string.Empty;
         try
@@ -78,7 +108,8 @@ public class WordsSearcher
         return destFileName;
     }
 
-    public void CreateModifiedFile(string sourceFilePath, string destinationDirectory, int amountOfMatches, string modifiedContent, ILogger logger)
+
+    public void CreateModifiedFile(string sourceFilePath, string destinationDirectory, int amountOfMatches, string modifiedContent)
     {
         var destFileName = string.Empty;
         try
@@ -94,20 +125,26 @@ public class WordsSearcher
                 number++;
             }
             File.WriteAllText(destFileName, modifiedContent);
-            logger.Information($"Created modified file: {newFileName}");
+            logger.Information($"Created modified file: {Path.GetFileName(destFileName)}");
         }
         catch (Exception ex)
         {
             logger.Error($"An error occurred while creating modified file for '{sourceFilePath}': {ex.Message}");
         }
     }
+
+
     public List<string> SearchWordsInDirectory(string directoryPath,
-        HashSet<string> forbiddenWords, string outputDirectory, ILogger logger)
+        HashSet<string> forbiddenWords, string outputDirectory)
     {
+
+        
+
         var sw = Stopwatch.StartNew();
-        var info = GetFilePathsFromDirectory(directoryPath, logger);
+        var info = GetFilePathsFromDirectory(directoryPath);
         var foundFiles = new ConcurrentBag<string>();
         var files = info.Files;
+       
 
         // Create a single regex for all forbidden words for efficiency.
         // \b ensures we match whole words only.
@@ -117,10 +154,19 @@ public class WordsSearcher
 
         var wordCountDict = new Dictionary<string, int>();
 
-        Parallel.ForEach(files, file =>
+        Parallel.ForEach(files, (file, state) =>
         {
             try
             {
+                manualResetEvent.Wait(cancellationTokenSource.Token); // Wait if paused or cancelled
+
+                if (cancellationTokenSource.Token.IsCancellationRequested)
+                {                    
+                    logger.Information("Search cancelled by user.");
+                    cancellationTokenSource.Cancel();
+                    state.Break();
+                }
+
                 var content = File.ReadAllText(file);
                 var matches = wordRegex.Matches(content);
 
@@ -140,12 +186,17 @@ public class WordsSearcher
                     foundFiles.Add(file);
                     
                     // Copy original
-                    var destFileName = CopyFile(file, outputDirectory, matches.Count, logger);
+                    var destFileName = CopyFile(file, outputDirectory, matches.Count);
 
                     // Create modified version
                     var modifiedContent = wordRegex.Replace(content, "*******");
-                    CreateModifiedFile(file, outputDirectory, matches.Count, modifiedContent, logger);
+                    CreateModifiedFile(file, outputDirectory, matches.Count, modifiedContent);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                logger.Information("Search cancelled by user.");
+                state.Break();
             }
             catch (Exception ex)
             {
