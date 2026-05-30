@@ -1,0 +1,5 @@
+forbidden
+banned
+censored
+blocked
+prohibited

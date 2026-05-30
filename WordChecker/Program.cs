@@ -95,6 +95,8 @@ var inputTask = Task.Run(() =>
     }
 });
 
+tasks.Add(inputTask);
+
 
 await Task.WhenAll(tasks);
 

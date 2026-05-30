@@ -1,0 +1,5 @@
+{
+  "InputDirectory": "C:\\path\\to\\forbidden_words.txt",
+  "OutputDirectory": "C:\\path\\to\\output",
+  "LogDirectory": "C:\\path\\to\\logs"
+}

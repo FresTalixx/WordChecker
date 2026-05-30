@@ -10,19 +10,27 @@ using System.Threading.Tasks;
 
 namespace WordChecker;
 
+public class SearchResult
+{
+    public List<string> FoundFiles { get; set; } = new();
+    public Dictionary<string, int> WordCounts { get; set; } = new();
+}
+
 public class WordsSearcher(ILogger logger, CancellationTokenSource cancellationTokenSource)
 {
     object lockObj = new object();
-    bool isPaused = false;
+    volatile bool isPaused = false;
     bool isCancelled = false;
     ManualResetEventSlim manualResetEvent = new ManualResetEventSlim(true);
+    private SearchResult? lastSearchResult;
+
+    public SearchResult? GetLastSearchResult() => lastSearchResult;
 
     public void Pause()
     {
         if (!isPaused)
         {
             manualResetEvent.Reset();
-            logger.Information("Search paused by user.");
             isPaused = true;
         }
         
@@ -32,7 +40,6 @@ public class WordsSearcher(ILogger logger, CancellationTokenSource cancellationT
     {
         cancellationTokenSource.Cancel();
         manualResetEvent.Set();
-        logger.Information("Search stopped by user.");
     }
 
     public void Resume()
@@ -44,12 +51,11 @@ public class WordsSearcher(ILogger logger, CancellationTokenSource cancellationT
         }
     }
 
-    public FilesAndInfo GetFilePathsFromDirectory(string directoryPath)
+    public IEnumerable<string> GetFilePathsFromDirectory(string directoryPath)
     {
-        var foundFiles = new ConcurrentBag<string>();
         var filePatterns = new[] { "*.txt", "*.md" };
 
-        var files = new List<string>();
+        var files = Enumerable.Empty<string>();
         try
         {
             var enumOptions = new EnumerationOptions
@@ -57,25 +63,21 @@ public class WordsSearcher(ILogger logger, CancellationTokenSource cancellationT
                 IgnoreInaccessible = true,
                 RecurseSubdirectories = true
             };
-
+            Console.WriteLine("Looking for files...");
             files = filePatterns.SelectMany(pattern =>
-                Directory.EnumerateFiles(directoryPath, pattern, enumOptions)).ToList();
-            foreach (var file in files)
-            {
-                logger.Information($"Found file {file}");
-            }
+                Directory.EnumerateFiles(directoryPath, pattern, enumOptions));
+            //foreach (var file in files)
+            //{
+            //    logger.Information($"Found file {file}");
+            //}
+            
         }
         catch (Exception ex)
         {
             logger.Error($"An error occurred while enumerating files in '{directoryPath}': {ex.Message}");
         }
 
-        var returnInfo = new FilesAndInfo
-        {
-            TotalFiles = files.Count,
-            Files = files
-        };
-        return returnInfo;
+        return files;
 
     }
 
@@ -137,86 +139,105 @@ public class WordsSearcher(ILogger logger, CancellationTokenSource cancellationT
     public List<string> SearchWordsInDirectory(string directoryPath,
         HashSet<string> forbiddenWords, string outputDirectory)
     {
-
-        
-
         var sw = Stopwatch.StartNew();
-        var info = GetFilePathsFromDirectory(directoryPath);
         var foundFiles = new ConcurrentBag<string>();
-        var files = info.Files;
-       
+        var files = GetFilePathsFromDirectory(directoryPath);
 
-        // Create a single regex for all forbidden words for efficiency.
-        // \b ensures we match whole words only.
         logger.Information($"Searching for forbidden words in directory '{directoryPath}'...");
         var forbiddenWordsPattern = string.Join("|", forbiddenWords.Select(Regex.Escape));
         var wordRegex = new Regex($@"\b({forbiddenWordsPattern})\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         var wordCountDict = new Dictionary<string, int>();
 
-        Parallel.ForEach(files, (file, state) =>
+        var parallelOptions = new ParallelOptions()
         {
-            try
+            MaxDegreeOfParallelism = Environment.ProcessorCount,
+            CancellationToken = cancellationTokenSource.Token
+        };
+        try
+        {
+            Parallel.ForEach(files, parallelOptions, (file, state) =>
             {
-                manualResetEvent.Wait(cancellationTokenSource.Token); // Wait if paused or cancelled
+                try
+                {
+                    manualResetEvent.Wait(cancellationTokenSource.Token);
 
-                if (cancellationTokenSource.Token.IsCancellationRequested)
-                {                    
-                    logger.Information("Search cancelled by user.");
-                    cancellationTokenSource.Cancel();
+                    var content = File.ReadAllText(file);
+                    var matches = wordRegex.Matches(content);
+
+                    if (matches.Count > 0)
+                    {
+                        lock (lockObj)
+                        {
+                            foreach (Match match in matches)
+                            {
+                                var word = match.Value.ToLower();
+                                if (wordCountDict.ContainsKey(word))
+                                    wordCountDict[word]++;
+                                else
+                                    wordCountDict[word] = 1;
+                            }
+                        }
+                        foundFiles.Add(file);
+
+                        var destFileName = CopyFile(file, outputDirectory, matches.Count);
+                        var modifiedContent = wordRegex.Replace(content, "*******");
+                        CreateModifiedFile(file, outputDirectory, matches.Count, modifiedContent);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
                     state.Break();
                 }
-
-                var content = File.ReadAllText(file);
-                var matches = wordRegex.Matches(content);
-
-                if (matches.Count > 0)
+                catch (Exception ex)
                 {
-                    lock (lockObj)
-                    {
-                        foreach (Match match in matches)
-                        {
-                            var word = match.Value.ToLower();
-                            if (wordCountDict.ContainsKey(word))
-                                wordCountDict[word]++;
-                            else
-                                wordCountDict[word] = 1;
-                        }
-                    }
-                    foundFiles.Add(file);
-                    
-                    // Copy original
-                    var destFileName = CopyFile(file, outputDirectory, matches.Count);
-
-                    // Create modified version
-                    var modifiedContent = wordRegex.Replace(content, "*******");
-                    CreateModifiedFile(file, outputDirectory, matches.Count, modifiedContent);
+                    logger.Error($"An error occurred while processing file '{file}': {ex.Message}");
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                logger.Information("Search cancelled by user.");
-                state.Break();
-            }
-            catch (Exception ex)
-            {
-                logger.Error($"An error occurred while processing file '{file}': {ex.Message}");
-            }
-        });
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            logger.Information("Search cancelled by user.");
+        }
+
+        Task.Delay(500).Wait();
+
+        if (isPaused)
+        {
+            logger.Information("Search is currently paused. Please resume to see results.");
+        }
+        if (isCancelled)
+        {
+            logger.Information("Search was cancelled. No results will be displayed.");
+        }
 
         logger.Information("Searching finished!");
         logger.Information($"Finished searching in directory '{directoryPath}'");
 
-        // Log top 10 most frequent forbidden words
-        var topWords = wordCountDict.OrderByDescending(kv => kv.Value).Take(10);
-        logger.Information("Top 10 most frequent forbidden words:");
-        foreach (var kv in topWords)
+        lastSearchResult = new SearchResult 
+        { 
+            FoundFiles = foundFiles.ToList(),
+            WordCounts = wordCountDict
+        };
+
+        if (!cancellationTokenSource.Token.IsCancellationRequested)
         {
-            logger.Information($"{kv.Key}: {kv.Value} occurrences");
+            var topWords = wordCountDict.OrderByDescending(kv => kv.Value).Take(10);
+            logger.Information("Top 10 most frequent forbidden words:");
+
+            foreach (var kv in topWords)
+            {
+                logger.Information($"{kv.Key}: {kv.Value} occurrences");
+            }
+            sw.Stop();
+            logger.Information($" Total time taken: {sw.Elapsed.TotalSeconds} seconds");
+
+            return foundFiles.ToList();
         }
+
         sw.Stop();
         logger.Information($" Total time taken: {sw.Elapsed.TotalSeconds} seconds");
 
-        return foundFiles.ToList();
+        return new List<string>();
     }
 }
